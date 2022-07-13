@@ -29,12 +29,11 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.nn as nn
 from asr_datamodule import SoapiesAsrDataModule
-from conformer import Conformer
+from model import TdnnLstm
 from lhotse.utils import fix_random_seed
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.tensorboard import SummaryWriter
-from transformer import Noam
 
 from icefall.ali import (
     convert_alignments_to_tensor,
@@ -116,64 +115,6 @@ def get_parser():
 
 
 def get_params(lang) -> AttributeDict:
-    """Return a dict containing training parameters.
-
-    All training related parameters that are not passed from the commandline
-    are saved in the variable `params`.
-
-    Commandline options are merged into `params` after they are parsed, so
-    you can also access them via `params`.
-
-    Explanation of options saved in `params`:
-
-        - graphs_dir: It specifies the directory where all training
-                      graphs (numerators and denominator)) are saved
-
-        - exp_dir: It specifies the directory where all training related
-                   files, e.g., checkpoints, log, etc, are saved
-
-        - best_train_loss: Best training loss so far. It is used to select
-                           the model that has the lowest training loss. It is
-                           updated during the training.
-
-        - best_valid_loss: Best validation loss so far. It is used to select
-                           the model that has the lowest validation loss. It is
-                           updated during the training.
-
-        - best_train_epoch: It is the epoch that has the best training loss.
-
-        - best_valid_epoch: It is the epoch that has the best validation loss.
-
-        - batch_idx_train: Used to writing statistics to tensorboard. It
-                           contains number of batches trained so far across
-                           epochs.
-
-        - log_interval:  Print training loss if batch_idx % log_interval` is 0
-
-        - reset_interval: Reset statistics if batch_idx % reset_interval is 0
-
-        - valid_interval:  Run validation if batch_idx % valid_interval is 0
-
-        - feature_dim: The model input dim. It has to match the one used
-                       in computing features.
-
-        - subsampling_factor:  The subsampling factor for the model.
-
-        - use_feat_batchnorm: Whether to do batch normalization for the
-                              input features.
-
-        - attention_dim: Hidden dim for multi-head attention model.
-
-        - head: Number of heads of multi-head attention model.
-
-        - num_decoder_layers: Number of decoder layer of transformer decoder.
-
-        - weight_decay:  The weight_decay for the optimizer.
-
-        - lr_factor: The lr_factor for Noam optimizer.
-
-        - warm_step: The warm_step for Noam optimizer.
-    """
     params = AttributeDict(
         {
             "graphs_dir": Path(f"data/graphs/{lang}"),
@@ -188,19 +129,15 @@ def get_params(lang) -> AttributeDict:
             "valid_interval": 3000,
             # parameters for conformer
             "feature_dim": 80,
-            "subsampling_factor": 4,
-            "use_feat_batchnorm": True,
-            "attention_dim": 512,
-            "nhead": 8,
+            "subsampling_factor": 3,
             # parameters for loss
             "beam_size": 6,  # will change it to 8 after some batches (see code)
             "reduction": "sum",
             "use_double_scores": True,
             "num_decoder_layers": 0,
-            # parameters for Noam
-            "weight_decay": 1e-6,
-            "lr_factor": 5.0,
-            "warm_step": 80000,
+            # parameters for AdamW
+            "weight_decay": 5e-4,
+            "lr": 1e-3,
             "den_scale": 1.0,
         }
     )
@@ -314,7 +251,7 @@ def compute_loss(
       params:
         Parameters for training. See :func:`get_params`.
       model:
-        The model for training. It is an instance of Conformer in our case.
+        The model for training.
       batch:
         A batch of data. See `lhotse.dataset.K2SpeechRecognitionDataset()`
         for the content in it.
@@ -330,6 +267,7 @@ def compute_loss(
     feature = batch["inputs"]
     # at entry, feature is (N, T, C)
     assert feature.ndim == 3
+    feature = feature.permute(0, 2, 1)
     feature = feature.to(device)
 
     supervisions = batch["supervisions"]
@@ -339,7 +277,7 @@ def compute_loss(
     seqlengths = supervisions["num_frames"].numpy()
 
     with torch.set_grad_enabled(is_training):
-        nnet_output, encoder_memory, memory_mask = model(feature, supervisions)
+        nnet_output = model(feature)
         # nnet_output is (N, T, C)
 
         # NOTE: We need `encode_supervisions` to sort sequences with
@@ -627,15 +565,11 @@ def run(rank, world_size, args):
 
     with open(params.graphs_dir / "numpdf", "r") as f:
         num_classes = int(f.readline().strip())
-    model = Conformer(
+
+    model = TdnnLstm(
         num_features=params.feature_dim,
-        nhead=params.nhead,
-        d_model=params.attention_dim,
         num_classes=num_classes,
         subsampling_factor=params.subsampling_factor,
-        num_decoder_layers=params.num_decoder_layers,
-        vgg_frontend=False,
-        use_feat_batchnorm=params.use_feat_batchnorm,
     )
 
     checkpoints = load_checkpoint_if_available(params=params, model=model)
@@ -644,11 +578,9 @@ def run(rank, world_size, args):
     if world_size > 1:
         model = DDP(model, device_ids=[rank])
 
-    optimizer = Noam(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
-        model_size=params.attention_dim,
-        factor=params.lr_factor,
-        warm_step=params.warm_step,
+        lr=params.lr,
         weight_decay=params.weight_decay,
     )
 
@@ -680,7 +612,7 @@ def run(rank, world_size, args):
         fix_random_seed(params.seed + epoch)
         train_dl.sampler.set_epoch(epoch)
 
-        cur_lr = optimizer._rate
+        cur_lr = optimizer.defaults["lr"]
         if tb_writer is not None:
             tb_writer.add_scalar(
                 "train/learning_rate", cur_lr, params.batch_idx_train
