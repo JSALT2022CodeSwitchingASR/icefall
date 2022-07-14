@@ -6,6 +6,7 @@ set -eou pipefail
 corpusdir=data/corpus
 lang="xhosa"
 njobs=$(nproc)
+ngram_order=3
 stage=1
 stop_stage=100
 
@@ -37,18 +38,48 @@ fi
 
 if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
 
-echo "================================================================"
-echo " 3. Download and prepare the lexicon and the phonet set"
-echo "================================================================"
+    echo "================================================================"
+    echo " 3. Download and prepare the lexicon and the phonet set"
+    echo "================================================================"
 
-python local/prepare_lang.py $lang $langdir
+    python local/prepare_lang.py $lang $langdir
 
 fi
 
 if [ $stage -le 4 ] && [ $stop_stage -ge 4 ]; then
 
+    echo "================================================================"
+    echo " 4. Prepare LM"
+    echo "================================================================"
+
+    python local/prepare_text.py $lang
+
+    mkdir -p data/lm/$lang
+
+    ngram-count \
+        -order $ngram_order \
+        -kn-modify-counts-at-end \
+        -ukndiscount \
+        -gt1min 0 \
+        -gt2min 0 \
+        -gt3min 0 \
+        -text data/texts/$lang/text_train+dev.txt \
+        -lm data/lm/$lang/lm.${ngram_order}gram.arpa
+
+    if [ ! -f data/lm/$lang/G_${ngram_order}gram.fst.txt ]; then
+        python3 -m kaldilm \
+            --read-symbol-table="data/lang/$lang/words.txt" \
+            --disambig-symbol='#0' \
+            --max-order=$ngram_order \
+            data/lm/$lang/lm.${ngram_order}gram.arpa > data/lm/$lang/G_${ngram_order}gram.fst.txt
+    fi
+
+fi
+
+if [ $stage -le 5 ] && [ $stop_stage -ge 5 ]; then
+
 echo "================================================================"
-echo " 4. Prepare the numerator and denominator graphs"
+echo " 5. Prepare the numerator and denominator graphs"
 echo "================================================================"
 
 mkdir -p $graphsdir
@@ -92,4 +123,5 @@ else
 fi
 
 fi
+
 
