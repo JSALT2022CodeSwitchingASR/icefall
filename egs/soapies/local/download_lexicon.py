@@ -27,34 +27,28 @@ def main(args):
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    lexicon = outdir / "lexicon"
+    lexicon_tmp = outdir / "lexicon.tmp"
+    lexicon = outdir / "lexicon.txt"
     if not lexicon.is_file():
         fid = fileids[args.lang]
-        response = urllib.request.urlopen(f"https://drive.google.com/uc?export=download&id={fid}")
-        with open(lexicon, "wb") as f:
+        url = f"https://drive.google.com/uc?export=download&id={fid}"
+        logging.info(f"downloading lexicon from {url}")
+
+        response = urllib.request.urlopen(url)
+        with open(lexicon_tmp, "wb") as f:
             f.write(gzip.decompress(response.read()))
 
-        # Add silence/unknown word specific words.
-        with open(lexicon, "a") as f:
-            print("<sil> sil", file=f)
-            print("<unk> unk", file=f)
+        toremove = set(["<s>", "</s>", "SIL-ENCE", "[s]"])
+        with open(lexicon_tmp, "r") as f_in, open(lexicon, "w") as f_out:
+            print("<SIL> <SIL>", file=f_out)
+            print("<UNK> <UNK>", file=f_out)
+            for line in f_in:
+                tokens = line.strip().split()
+                if tokens[0] not in toremove:
+                    print(tokens[0].upper(), " ".join(tokens[1:]), file=f_out)
+        lexicon_tmp.unlink()
     else:
         logging.info(f'lexicon already extracted to {lexicon}')
-
-    units = outdir / "units"
-    if not units.is_file():
-        unit_set = set()
-        with open(lexicon, 'r') as f:
-            for line in f:
-                for unit in line.strip().split()[1:]:
-                    unit_set.add(unit)
-
-        with open(units, 'w') as f:
-            for unit in sorted(unit_set):
-                print(unit, file=f)
-
-    else:
-        logging.info(f'unit set already extracted to {units}')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
