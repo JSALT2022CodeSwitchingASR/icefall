@@ -15,24 +15,37 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Compute fbank features for a language of the soapies corpus.
-
-It looks for manifests in the directory data/manifests.
-
-The generated fbank features are saved in data/fbank.
-"""
 
 import argparse
 import logging
 import os
 from pathlib import Path
+import unicodedata
 
 from lhotse import SupervisionSet
 
+lang_shortname = {
+    "xhosa": "xh",
+    "zulu": "zu",
+    "sesotho": "st",
+    "setswana": "tn",
+}
+
+def remove_accents(input_str):
+    nfkd_form = unicodedata.normalize('NFKD', input_str)
+    return u"".join([c for c in nfkd_form if not unicodedata.combining(c)])
+
+def add_line(words, line):
+    for word in line.split():
+        words.add(word)
+
+def preprocess_text(text):
+    return remove_accents(text.strip().upper().replace("-", " ").replace(".", "").replace("_", ""))
+
 def prepare_text(lang):
     src_dir = Path("data/manifests") / lang
-    output_dir = Path("data/texts") / lang
+    texts_dir = Path("data/texts")
+    output_dir = texts_dir / lang
     output_dir.mkdir(parents=True, exist_ok=True)
     dataset_parts = (
         "train",
@@ -48,14 +61,44 @@ def prepare_text(lang):
             src_dir / f"{prefix}_supervisions_{split}.{suffix}"
         )
 
-    with open(output_dir / "text_train+dev.txt", "w") as f:
+    words = set()
+
+    logging.info("creating LM train corpus")
+    with open(output_dir / "text_train_corpus.txt", "w") as f:
         for split in ("train", "dev"):
             for supervision in supervisions[split]:
-                print(supervision.text, file=f)
+                text = preprocess_text(supervision.text)
+                add_line(words, text)
+                print(text, file=f)
 
-    with open(output_dir / "text_test.txt", "w") as f:
-        for supervision in supervisions["test"]:
-                print(supervision.text, file=f)
+        with open(texts_dir / f"bible_{lang}.txt", "r") as src:
+            for line in src:
+                line = preprocess_text(line)
+                add_line(words, line)
+                print(line, file=f)
+
+        with open(texts_dir / f"nchlt_{lang_shortname[lang]}.txt", "r") as src:
+            for line in src:
+                line = preprocess_text(line)
+                add_line(words, line)
+                print(line, file=f)
+
+        if lang == "xhosa" or lang == "zulu":
+            with open(texts_dir / f"{lang}.txt", "r") as src:
+                for line in src:
+                    line = line.strip().upper()
+                    add_line(words, line)
+                    print(line, file=f)
+
+    with open(output_dir / "words.txt", "w") as f:
+        for word in sorted(words):
+            if word == "<UNK>":
+                continue
+            print(word, file=f)
+
+    #with open(output_dir / "text_test.txt", "w") as f:
+    #    for supervision in supervisions["test"]:
+    #            print(supervision.text, file=f)
 
 
 if __name__ == "__main__":
